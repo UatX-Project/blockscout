@@ -4,6 +4,7 @@
 - [#5540](https://github.com/blockscout/blockscout/pull/5540) - Tx page: scroll to selected tab's data
 
 ### Fixes
+- [#5561](https://github.com/blockscout/blockscout/pull/5561) - Improve working with contracts implementations
 - [#5538](https://github.com/blockscout/blockscout/pull/5538) - Fix internal transaction's tile bug
 
 ### Chore
