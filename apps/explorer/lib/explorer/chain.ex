@@ -2954,6 +2954,73 @@ defmodule Explorer.Chain do
     end
   end
 
+  def get_average_gas_price(num_of_blocks, safelow_percentile, average_percentile, fast_percentile) do
+    lates_gas_price_query =
+      from(
+        block in Block,
+        left_join: transaction in assoc(block, :transactions),
+        where: block.consensus == true,
+        where: transaction.status == ^1,
+        where: transaction.gas_price > ^0,
+        group_by: block.number,
+        order_by: [desc: block.number],
+        select: min(transaction.gas_price),
+        limit: ^num_of_blocks
+      )
+
+    latest_gas_prices =
+      lates_gas_price_query
+      |> Repo.all(timeout: :infinity)
+
+    latest_ordered_gas_prices =
+      latest_gas_prices
+      |> Enum.map(fn %Explorer.Chain.Wei{value: gas_price} -> Decimal.to_integer(gas_price) end)
+
+    safelow_gas_price = gas_price_percentile_to_gwei(latest_ordered_gas_prices, safelow_percentile)
+    average_gas_price = gas_price_percentile_to_gwei(latest_ordered_gas_prices, average_percentile)
+    fast_gas_price = gas_price_percentile_to_gwei(latest_ordered_gas_prices, fast_percentile)
+
+    gas_prices = %{
+      "slow" => safelow_gas_price,
+      "average" => average_gas_price,
+      "fast" => fast_gas_price
+    }
+
+    {:ok, gas_prices}
+  catch
+    error ->
+      {:error, error}
+  end
+
+  defp gas_price_percentile_to_gwei(gas_prices, percentile) do
+    safelow_gas_price_wei = percentile(gas_prices, percentile)
+
+    if safelow_gas_price_wei do
+      safelow_gas_price_gwei = Wei.to(%Explorer.Chain.Wei{value: Decimal.from_float(safelow_gas_price_wei)}, :gwei)
+
+      safelow_gas_price_gwei
+      |> Decimal.to_float()
+      |> Float.ceil(2)
+    else
+      nil
+    end
+  end
+
+  @spec percentile(list, number) :: number | nil
+  defp percentile([], _), do: nil
+  defp percentile([x], _), do: x
+  defp percentile(list, 0), do: Enum.min(list)
+  defp percentile(list, 100), do: Enum.max(list)
+
+  defp percentile(list, n) when is_list(list) and is_number(n) do
+    s = Enum.sort(list)
+    r = n / 100.0 * (length(list) - 1)
+    f = :erlang.trunc(r)
+    lower = Enum.at(s, f)
+    upper = Enum.at(s, f + 1)
+    lower + (upper - lower) * (r - f)
+  end
+
   @spec upsert_last_fetched_counter(map()) :: {:ok, LastFetchedCounter.t()} | {:error, Ecto.Changeset.t()}
   def upsert_last_fetched_counter(params) do
     changeset = LastFetchedCounter.changeset(%LastFetchedCounter{}, params)
@@ -2991,6 +3058,11 @@ defmodule Explorer.Chain do
   def fetch_min_missing_block_cache do
     max_block_number = BlockNumber.get_max()
 
+    min_missing_block_number =
+      "min_missing_block_number"
+      |> Chain.get_last_fetched_counter()
+      |> Decimal.to_integer()
+
     if max_block_number > 0 do
       query =
         from(b in Block,
@@ -2998,10 +3070,11 @@ defmodule Explorer.Chain do
             missing_range in fragment(
               """
                 (SELECT b1.number
-                FROM generate_series(0, (?)::integer) AS b1(number)
+                FROM generate_series((?)::integer, (?)::integer) AS b1(number)
                 WHERE NOT EXISTS
                   (SELECT 1 FROM blocks b2 WHERE b2.number=b1.number AND b2.consensus))
               """,
+              ^min_missing_block_number,
               ^max_block_number
             ),
           on: b.number == missing_range.number,
@@ -3630,7 +3703,7 @@ defmodule Explorer.Chain do
         ]
   def transaction_to_token_transfers(transaction_hash, options \\ []) when is_list(options) do
     necessity_by_association = Keyword.get(options, :necessity_by_association, %{})
-    paging_options = Keyword.get(options, :paging_options, @default_paging_options)
+    paging_options = options |> Keyword.get(:paging_options, @default_paging_options) |> Map.put(:asc_order, true)
 
     TokenTransfer
     |> join(:inner, [token_transfer], transaction in assoc(token_transfer, :transaction))
@@ -3641,7 +3714,7 @@ defmodule Explorer.Chain do
     )
     |> TokenTransfer.page_token_transfer(paging_options)
     |> limit(^paging_options.page_size)
-    |> order_by([token_transfer], asc: token_transfer.inserted_at)
+    |> order_by([token_transfer], asc: token_transfer.log_index)
     |> join_associations(necessity_by_association)
     |> Repo.all()
   end
